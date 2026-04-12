@@ -46,7 +46,10 @@ from open_webui.config import (
     WHISPER_LANGUAGE,
     WHISPER_MULTILINGUAL,
     ELEVENLABS_API_BASE_URL,
+    OPENAI_API_BASE_URL, #--------------------------------
+    OPENAI_API_KEY,  
 )
+#--------------------------------
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
@@ -564,455 +567,51 @@ def transcription_handler(request, file_path, metadata, user=None):
         None,  # Always fallback to None in case transcription fails
     ]
 
-    if request.app.state.config.STT_ENGINE == '':
-        if request.app.state.faster_whisper_model is None:
-            request.app.state.faster_whisper_model = set_faster_whisper_model(request.app.state.config.WHISPER_MODEL)
+    #-------------------------------------------------------------------------------
+    request.app.state.config.STT_ENGINE = 'openai'
 
-        model = request.app.state.faster_whisper_model
-        segments, info = model.transcribe(
-            file_path,
-            beam_size=5,
-            vad_filter=WHISPER_VAD_FILTER,
-            language=languages[0],
-            multilingual=WHISPER_MULTILINGUAL,
-        )
-        log.info("Detected language '%s' with probability %f" % (info.language, info.language_probability))
-
-        transcript = ''.join([segment.text for segment in list(segments)])
-        data = {'text': transcript.strip()}
-
-        # save the transcript to a json file
+    print(f"[STT] Using MWS GPT API with model: whisper-turbo-local")
+    r = None
+    try:
+        for language in languages:
+            with open(file_path, 'rb') as audio_file:
+                files = {'file': (filename, audio_file)}
+                data = {'model': 'whisper-turbo-local'}
+                    
+                if language:
+                    data['language'] = language
+                    
+                r = requests.post(
+                    url=f'{OPENAI_API_BASE_URL}/audio/transcriptions',
+                    headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
+                    files=files,
+                    data=data,
+                    timeout=AIOHTTP_CLIENT_TIMEOUT,
+                )
+                
+            if r.status_code == 200:
+                break
+            
+        r.raise_for_status()
+        data = r.json()
+            
         transcript_file = f'{file_dir}/{id}.json'
         with open(transcript_file, 'w') as f:
             json.dump(data, f)
-
-        log.debug(data)
+            
         return data
-    elif request.app.state.config.STT_ENGINE == 'openai':
-        r = None
-        try:
-            for language in languages:
-                payload = {
-                    'model': request.app.state.config.STT_MODEL,
-                }
-
-                if language:
-                    payload['language'] = language
-
-                headers = {'Authorization': f'Bearer {request.app.state.config.STT_OPENAI_API_KEY}'}
-                if user and ENABLE_FORWARD_USER_INFO_HEADERS:
-                    headers = include_user_info_headers(headers, user)
-
-                with open(file_path, 'rb') as audio_file:
-                    r = requests.post(
-                        url=f'{request.app.state.config.STT_OPENAI_API_BASE_URL}/audio/transcriptions',
-                        headers=headers,
-                        files={'file': (filename, audio_file)},
-                        data=payload,
-                        timeout=AIOHTTP_CLIENT_TIMEOUT,
-                    )
-
-                if r.status_code == 200:
-                    # Successful transcription
-                    break
-
-            r.raise_for_status()
-            data = r.json()
-
-            # save the transcript to a json file
-            transcript_file = f'{file_dir}/{id}.json'
-            with open(transcript_file, 'w') as f:
-                json.dump(data, f)
-
-            return data
-        except Exception as e:
-            log.exception(e)
-
-            detail = None
-            if r is not None:
-                try:
-                    res = r.json()
-                    if 'error' in res:
-                        detail = f'External: {res["error"].get("message", "")}'
-                except Exception:
-                    detail = f'External: {e}'
-
-            raise Exception(detail if detail else 'Open WebUI: Server Connection Error')
-
-    elif request.app.state.config.STT_ENGINE == 'deepgram':
-        try:
-            # Determine the MIME type of the file
-            mime, _ = mimetypes.guess_type(file_path)
-            if not mime:
-                mime = 'audio/wav'  # fallback to wav if undetectable
-
-            # Read the audio file
-            with open(file_path, 'rb') as f:
-                file_data = f.read()
-
-            # Build headers and parameters
-            headers = {
-                'Authorization': f'Token {request.app.state.config.DEEPGRAM_API_KEY}',
-                'Content-Type': mime,
-            }
-
-            for language in languages:
-                params = {}
-                if request.app.state.config.STT_MODEL:
-                    params['model'] = request.app.state.config.STT_MODEL
-
-                if language:
-                    params['language'] = language
-
-                # Make request to Deepgram API
-                r = requests.post(
-                    'https://api.deepgram.com/v1/listen?smart_format=true',
-                    headers=headers,
-                    params=params,
-                    data=file_data,
-                    timeout=AIOHTTP_CLIENT_TIMEOUT,
-                )
-
-                if r.status_code == 200:
-                    # Successful transcription
-                    break
-
-            r.raise_for_status()
-            response_data = r.json()
-
-            # Extract transcript from Deepgram response
+    except Exception as e:
+        log.exception(e)
+        detail = None
+        if r is not None:
             try:
-                transcript = response_data['results']['channels'][0]['alternatives'][0].get('transcript', '')
-            except (KeyError, IndexError) as e:
-                log.error(f'Malformed response from Deepgram: {str(e)}')
-                raise Exception('Failed to parse Deepgram response - unexpected response format')
-            data = {'text': transcript.strip()}
-
-            # Save transcript
-            transcript_file = f'{file_dir}/{id}.json'
-            with open(transcript_file, 'w') as f:
-                json.dump(data, f)
-
-            return data
-
-        except Exception as e:
-            log.exception(e)
-            detail = None
-            if r is not None:
-                try:
-                    res = r.json()
-                    if 'error' in res:
-                        detail = f'External: {res["error"].get("message", "")}'
-                except Exception:
-                    detail = f'External: {e}'
-            raise Exception(detail if detail else 'Open WebUI: Server Connection Error')
-
-    elif request.app.state.config.STT_ENGINE == 'azure':
-        # Check file exists and size
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=400, detail='Audio file not found')
-
-        # Check file size (Azure has a larger limit of 200MB)
-        file_size = os.path.getsize(file_path)
-        if file_size > AZURE_MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File size exceeds Azure's limit of {AZURE_MAX_FILE_SIZE_MB}MB",
-            )
-
-        api_key = request.app.state.config.AUDIO_STT_AZURE_API_KEY
-        region = request.app.state.config.AUDIO_STT_AZURE_REGION or 'eastus'
-        locales = request.app.state.config.AUDIO_STT_AZURE_LOCALES
-        base_url = request.app.state.config.AUDIO_STT_AZURE_BASE_URL
-        max_speakers = request.app.state.config.AUDIO_STT_AZURE_MAX_SPEAKERS or 3
-
-        # IF NO LOCALES, USE DEFAULTS
-        if len(locales) < 2:
-            locales = [
-                'en-US',
-                'es-ES',
-                'es-MX',
-                'fr-FR',
-                'hi-IN',
-                'it-IT',
-                'de-DE',
-                'en-GB',
-                'en-IN',
-                'ja-JP',
-                'ko-KR',
-                'pt-BR',
-                'zh-CN',
-            ]
-            locales = ','.join(locales)
-
-        if not api_key or not region:
-            raise HTTPException(
-                status_code=400,
-                detail='Azure API key is required for Azure STT',
-            )
-
-        r = None
-        try:
-            # Prepare the request
-            data = {
-                'definition': json.dumps(
-                    {
-                        'locales': locales.split(','),
-                        'diarization': {'maxSpeakers': max_speakers, 'enabled': True},
-                    }
-                    if locales
-                    else {}
-                )
-            }
-
-            url = (
-                base_url or f'https://{region}.api.cognitive.microsoft.com'
-            ) + '/speechtotext/transcriptions:transcribe?api-version=2024-11-15'
-
-            # Use context manager to ensure file is properly closed
-            with open(file_path, 'rb') as audio_file:
-                r = requests.post(
-                    url=url,
-                    files={'audio': audio_file},
-                    data=data,
-                    headers={
-                        'Ocp-Apim-Subscription-Key': api_key,
-                    },
-                    timeout=AIOHTTP_CLIENT_TIMEOUT,
-                )
-
-            r.raise_for_status()
-            response = r.json()
-
-            # Extract transcript from response
-            if not response.get('combinedPhrases'):
-                raise ValueError('No transcription found in response')
-
-            # Get the full transcript from combinedPhrases
-            transcript = response['combinedPhrases'][0].get('text', '').strip()
-            if not transcript:
-                raise ValueError('Empty transcript in response')
-
-            data = {'text': transcript}
-
-            # Save transcript to json file (consistent with other providers)
-            transcript_file = f'{file_dir}/{id}.json'
-            with open(transcript_file, 'w') as f:
-                json.dump(data, f)
-
-            log.debug(data)
-            return data
-
-        except (KeyError, IndexError, ValueError) as e:
-            log.exception('Error parsing Azure response')
-            raise HTTPException(
-                status_code=500,
-                detail=f'Failed to parse Azure response: {str(e)}',
-            )
-        except requests.exceptions.RequestException as e:
-            log.exception(e)
-            detail = None
-            status_code = getattr(r, 'status_code', 500) if r else 500
-
-            try:
-                if r is not None and r.status_code != 200:
-                    res = r.json()
-                    # Azure returns {"code": "...", "message": "...", "innerError": {...}}
-                    if 'code' in res and 'message' in res:
-                        azure_code = res.get('innerError', {}).get('code', res['code'])
-                        user_facing_codes = {
-                            'EmptyAudioFile',
-                            'AudioLengthLimitExceeded',
-                            'NoLanguageIdentified',
-                            'MultipleLanguagesIdentified',
-                        }
-                        if azure_code in user_facing_codes:
-                            detail = res['message']
-                        else:
-                            log.error(f'Azure STT error [{azure_code}]: {res["message"]}')
-                            detail = 'An error occurred during transcription.'
-                    elif 'error' in res:
-                        detail = f'External: {res["error"].get("message", "")}'
+                res = r.json()
+                if 'error' in res:
+                    detail = f'External: {res["error"].get("message", "")}'
             except Exception:
                 detail = f'External: {e}'
-
-            raise HTTPException(
-                status_code=status_code,
-                detail=detail if detail else 'Open WebUI: Server Connection Error',
-            )
-
-    elif request.app.state.config.STT_ENGINE == 'mistral':
-        # Check file exists
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=400, detail='Audio file not found')
-
-        # Check file size
-        file_size = os.path.getsize(file_path)
-        if file_size > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f'File size exceeds limit of {MAX_FILE_SIZE_MB}MB',
-            )
-
-        api_key = request.app.state.config.AUDIO_STT_MISTRAL_API_KEY
-        api_base_url = request.app.state.config.AUDIO_STT_MISTRAL_API_BASE_URL or 'https://api.mistral.ai/v1'
-        use_chat_completions = request.app.state.config.AUDIO_STT_MISTRAL_USE_CHAT_COMPLETIONS
-
-        if not api_key:
-            raise HTTPException(
-                status_code=400,
-                detail='Mistral API key is required for Mistral STT',
-            )
-
-        r = None
-        try:
-            # Use voxtral-mini-latest as the default model for transcription
-            model = request.app.state.config.STT_MODEL or 'voxtral-mini-latest'
-
-            log.info(
-                f'Mistral STT - model: {model}, '
-                f'method: {"chat_completions" if use_chat_completions else "transcriptions"}'
-            )
-
-            if use_chat_completions:
-                # Use chat completions API with audio input
-                # This method requires mp3 or wav format
-                audio_file_to_use = file_path
-
-                if is_audio_conversion_required(file_path):
-                    log.debug('Converting audio to mp3 for chat completions API')
-                    converted_path = convert_audio_to_mp3(file_path)
-                    if converted_path:
-                        audio_file_to_use = converted_path
-                    else:
-                        log.error('Audio conversion failed')
-                        raise HTTPException(
-                            status_code=500,
-                            detail='Audio conversion failed. Chat completions API requires mp3 or wav format.',
-                        )
-
-                # Read and encode audio file as base64
-                with open(audio_file_to_use, 'rb') as audio_file:
-                    audio_base64 = base64.b64encode(audio_file.read()).decode('utf-8')
-
-                # Prepare chat completions request
-                url = f'{api_base_url}/chat/completions'
-
-                # Add language instruction if specified
-                language = metadata.get('language', None) if metadata else None
-                if language:
-                    text_instruction = f'Transcribe this audio exactly as spoken in {language}. Do not translate it.'
-                else:
-                    text_instruction = 'Transcribe this audio exactly as spoken in its original language. Do not translate it to another language.'
-
-                payload = {
-                    'model': model,
-                    'messages': [
-                        {
-                            'role': 'user',
-                            'content': [
-                                {
-                                    'type': 'input_audio',
-                                    'input_audio': audio_base64,
-                                },
-                                {'type': 'text', 'text': text_instruction},
-                            ],
-                        }
-                    ],
-                }
-
-                r = requests.post(
-                    url=url,
-                    json=payload,
-                    headers={
-                        'Authorization': f'Bearer {api_key}',
-                        'Content-Type': 'application/json',
-                    },
-                    timeout=AIOHTTP_CLIENT_TIMEOUT,
-                )
-
-                r.raise_for_status()
-                response = r.json()
-
-                # Extract transcript from chat completion response
-                transcript = response.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-                if not transcript:
-                    raise ValueError('Empty transcript in response')
-
-                data = {'text': transcript}
-
-            else:
-                # Use dedicated transcriptions API
-                url = f'{api_base_url}/audio/transcriptions'
-
-                # Determine the MIME type
-                mime_type, _ = mimetypes.guess_type(file_path)
-                if not mime_type:
-                    mime_type = 'audio/webm'
-
-                # Use context manager to ensure file is properly closed
-                with open(file_path, 'rb') as audio_file:
-                    files = {'file': (filename, audio_file, mime_type)}
-                    data_form = {'model': model}
-
-                    # Add language if specified in metadata
-                    language = metadata.get('language', None) if metadata else None
-                    if language:
-                        data_form['language'] = language
-
-                    r = requests.post(
-                        url=url,
-                        files=files,
-                        data=data_form,
-                        headers={
-                            'Authorization': f'Bearer {api_key}',
-                        },
-                        timeout=AIOHTTP_CLIENT_TIMEOUT,
-                    )
-
-                r.raise_for_status()
-                response = r.json()
-
-                # Extract transcript from response
-                transcript = response.get('text', '').strip()
-                if not transcript:
-                    raise ValueError('Empty transcript in response')
-
-                data = {'text': transcript}
-
-            # Save transcript to json file (consistent with other providers)
-            transcript_file = f'{file_dir}/{id}.json'
-            with open(transcript_file, 'w') as f:
-                json.dump(data, f)
-
-            log.debug(data)
-            return data
-
-        except ValueError as e:
-            log.exception('Error parsing Mistral response')
-            raise HTTPException(
-                status_code=500,
-                detail=f'Failed to parse Mistral response: {str(e)}',
-            )
-        except requests.exceptions.RequestException as e:
-            log.exception(e)
-            detail = None
-
-            try:
-                if r is not None and r.status_code != 200:
-                    res = r.json()
-                    if 'error' in res:
-                        detail = f'External: {res["error"].get("message", "")}'
-                    else:
-                        detail = f'External: {r.text}'
-            except Exception:
-                detail = f'External: {e}'
-
-            raise HTTPException(
-                status_code=getattr(r, 'status_code', 500) if r else 500,
-                detail=detail if detail else 'Open WebUI: Server Connection Error',
-            )
-
+        raise Exception(detail if detail else 'Open WebUI: Server Connection Error')      
+#----------------------------------------------------------------------------------------
 
 def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None, user=None):
     log.info(f'transcribe: {file_path} {metadata}')

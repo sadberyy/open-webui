@@ -1088,13 +1088,14 @@ OPENAI_API_CONFIGS = PersistentConfig(
 )
 
 # Get the actual OpenAI API key based on the base URL
-OPENAI_API_KEY = ''
+#-------------------------------------------
+'''OPENAI_API_KEY = ""
 try:
-    OPENAI_API_KEY = OPENAI_API_KEYS.value[OPENAI_API_BASE_URLS.value.index('https://api.openai.com/v1')]
+    OPENAI_API_KEY = OPENAI_API_KEYS.value[OPENAI_API_BASE_URLS.value.index("https://api.openai.com/v1")]
 except Exception:
     pass
-OPENAI_API_BASE_URL = 'https://api.openai.com/v1'
-
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"''' 
+#-------------------------------------------
 
 ####################################
 # MODELS
@@ -2804,8 +2805,9 @@ PDF_LOADER_MODE = PersistentConfig(
 RAG_EMBEDDING_MODEL = PersistentConfig(
     'RAG_EMBEDDING_MODEL',
     'rag.embedding_model',
-    os.environ.get('RAG_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
+    os.environ.get('RAG_EMBEDDING_MODEL', 'bge-m3'), #-----------------------------------------------------------------#
 )
+
 log.info(f'Embedding model set: {RAG_EMBEDDING_MODEL.value}')
 
 RAG_EMBEDDING_MODEL_AUTO_UPDATE = (

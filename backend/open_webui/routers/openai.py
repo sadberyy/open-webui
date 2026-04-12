@@ -30,7 +30,10 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.groups import Groups
 from open_webui.config import (
     CACHE_DIR,
+    OPENAI_API_BASE_URL,#-----------------------
+    OPENAI_API_KEY,
 )
+#---------------------------------------------------
 from open_webui.env import (
     MODELS_CACHE_TTL,
     AIOHTTP_CLIENT_SESSION_SSL,
@@ -59,6 +62,10 @@ from open_webui.utils.misc import (
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
+
+from open_webui.models.memories import Memories
+from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+from openai import AsyncOpenAI
 
 log = logging.getLogger(__name__)
 
@@ -1023,7 +1030,440 @@ async def generate_chat_completion(
     payload = {**form_data}
     metadata = payload.pop('metadata', None)
 
-    model_id = form_data.get('model')
+    #--------------------------------------------------------------------------------
+        
+    VISION_MODELS = ["qwen2.5-vl-72b", "cotype-pro-vl-32b", "qwen2.5-vl"]
+    IMAGE_GEN_MODEL = "qwen-image-lightning" 
+    DEFAULT_MODEL = "mws-gpt-alpha"
+    CODE_MODEL = "qwen3-coder-480b-a35b"
+    REASONING_MODEL = "deepseek-r1-distill-qwen-32b"
+    LONG_CONTEXT_MODEL = "llama-3.3-70b-instruct"
+    
+    # Долгосрочная память
+    if request.app.state.config.ENABLE_MEMORIES and user:
+        try:
+            messages = payload.get('messages', [])
+            user_messages = [m for m in messages if m.get('role') == 'user']
+            
+            if user_messages:
+                last_query = user_messages[-1].get('content', '')
+                if isinstance(last_query, list):
+                    text_parts = [part.get('text', '') for part in last_query if isinstance(part, dict) and part.get('type') == 'text']
+                    last_query = ' '.join(text_parts) if text_parts else ''
+                
+                if last_query and isinstance(last_query, str) and len(last_query.strip()) > 0:
+                    memories = Memories.get_memories_by_user_id(user.id)
+                    
+                    if memories:
+                        query_vector = await request.app.state.EMBEDDING_FUNCTION(last_query, user=user)
+                        
+                        results = VECTOR_DB_CLIENT.search(
+                            collection_name=f'user-memory-{user.id}',
+                            vectors=[query_vector],
+                            limit=3,
+                        )
+                        
+                        if results and results.ids and results.ids[0]:
+                            memory_context = "Важная информация о пользователе (из долгосрочной памяти):\n"
+                            for idx, doc_id in enumerate(results.ids[0]):
+                                if idx < len(results.documents[0]):
+                                    text = results.documents[0][idx]
+                                    if text:
+                                        memory_context += f"- {text}\n"
+                            
+                            if messages and len(messages) > 0:
+                                system_messages = [m for m in messages if m.get('role') == 'system']
+                                if system_messages:
+                                    system_messages[0]['content'] = memory_context + "\n\n" + system_messages[0].get('content', '')
+                                else:
+                                    messages.insert(0, {
+                                        "role": "system",
+                                        "content": memory_context
+                                    })
+                                payload['messages'] = messages
+                                print(f"[MEMORY] Added {len(results.ids[0])} relevant memories to context")
+        
+        except Exception as e:
+            print(f"[MEMORY] Error: {e}")
+    
+    # LLM сама решает, какую информацию нужно запомнить
+    if request.app.state.config.ENABLE_MEMORIES and user:
+        try:
+            
+            messages = payload.get('messages', [])
+            user_messages = [m for m in messages if m.get('role') == 'user']
+            assistant_messages = [m for m in messages if m.get('role') == 'assistant']
+            
+            if user_messages:
+                # Берём последнее сообщение пользователя и ответ ассистента (если есть)
+                last_user_msg = user_messages[-1].get('content', '')
+                last_assistant_msg = assistant_messages[-1].get('content', '') if assistant_messages else ''
+                
+                if isinstance(last_user_msg, list):
+                    text_parts = [part.get('text', '') for part in last_user_msg if isinstance(part, dict) and part.get('type') == 'text']
+                    last_user_msg = ' '.join(text_parts)
+                if isinstance(last_assistant_msg, list):
+                    text_parts = [part.get('text', '') for part in last_assistant_msg if isinstance(part, dict) and part.get('type') == 'text']
+                    last_assistant_msg = ' '.join(text_parts)
+                
+                if last_user_msg and isinstance(last_user_msg, str):
+                    memory_client = AsyncOpenAI(
+                        base_url=OPENAI_API_BASE_URL,
+                        api_key=OPENAI_API_KEY,
+                        timeout=10.0
+                    )
+                    
+                    analysis_prompt = f"""Ты — система управления долгосрочной памятью. Проанализируй диалог и реши, нужно ли сохранить информацию о пользователе в память.
+Правила сохранения:
+1. Сохраняй информацию о профессии, образовании, навыках
+2. Сохраняй информацию о предпочтениях, интересах, хобби
+3. Сохраняй информацию о личных фактах (семейное положение, место жительства и т.д.)
+4. Сохраняй информацию о здоровье, диете, аллергиях
+5. НЕ сохраняй: одноразовые просьбы, вопросы, приветствия, временные запросы
+6. НЕ сохраняй: информацию о текущем диалоге, которая не относится к пользователю
+
+Пользователь сказал: "{last_user_msg[:500]}"
+Ассистент ответил: "{last_assistant_msg[:500]}" if last_assistant_msg else ""
+Если нужно сохранить информацию, ответь в формате:
+SAVE: [информация для сохранения]
+Если ничего не нужно сохранять, ответь: NONE
+Важно: формулируй информацию от третьего лица, используя "User" (например: "User is a veterinarian", "User likes Python").
+"""
+                    
+                    try:
+                        analysis_response = await memory_client.chat.completions.create(
+                            model=DEFAULT_MODEL,
+                            messages=[{"role": "user", "content": analysis_prompt}],
+                            max_tokens=200,
+                            temperature=0.3
+                        )
+                        
+                        result = analysis_response.choices[0].message.content.strip()
+                        
+                        if result.startswith("SAVE:"):
+                            fact = result.replace("SAVE:", "").strip()
+                            if fact and len(fact) > 10 and fact != "NONE":
+                                # Проверяем, нет ли уже такого воспоминания
+                                existing_memories = Memories.get_memories_by_user_id(user.id)
+                                existing_texts = [m.content.lower() for m in existing_memories] if existing_memories else []
+                                
+                                if fact.lower() not in existing_texts:
+                                    # Сохраняем новое воспоминание
+                                    memory = Memories.insert_new_memory(user.id, fact)
+                                    print(f"[MEMORY] LLM decided to save: {fact}")
+                                    
+                                    # Сохраняем эмбеддинг
+                                    vector = await request.app.state.EMBEDDING_FUNCTION(fact, user=user)
+                                    VECTOR_DB_CLIENT.upsert(
+                                        collection_name=f'user-memory-{user.id}',
+                                        items=[{
+                                            'id': memory.id,
+                                            'text': fact,
+                                            'vector': vector,
+                                            'metadata': {'created_at': memory.created_at},
+                                        }],
+                                    )
+                    except Exception as e:
+                        print(f"[MEMORY] Analysis error: {e}")
+                        
+        except Exception as e:
+            print(f"[MEMORY] Auto-save error: {e}")
+    # ========== КОНЕЦ УМНОГО АВТОМАТИЧЕСКОГО СОХРАНЕНИЯ ==========
+
+    # Удаляем информацию о предыдущей модели из запроса. Это заставит систему заново определить модель для каждого сообщения
+    if 'model' in form_data:
+        user_selected_model = form_data.get('model')
+        if not metadata or not metadata.get('manual_model_selection'):
+            old_model = form_data.get('model')
+            print(f"[ROUTER] Clearing cached model: {old_model} → will re-route")
+
+    async def smart_route(user_msg: str, has_img: bool, has_file: bool, metadata=None, conversation_history: list = None) -> str:
+        # Защита от нестроковых значений
+        if not isinstance(user_msg, str):
+            user_msg = str(user_msg) if user_msg else ""
+
+        # Если есть изображение - vision модель
+        if has_img:
+            selected_vision_model = VISION_MODELS[0]
+            print(f"[ROUTER] Image detected → {selected_vision_model}")
+            return selected_vision_model
+        
+        # Если есть файл (не изображение) - long context
+        if has_file:
+            print(f"[ROUTER] File detected → {LONG_CONTEXT_MODEL}")
+            return LONG_CONTEXT_MODEL
+        
+        # Определяем, нужно ли генерировать изображение
+        client = AsyncOpenAI(
+            base_url=OPENAI_API_BASE_URL,
+            api_key=OPENAI_API_KEY,
+            timeout=5.0
+        )
+        
+        intent_prompt = f"""Определи, что хочет пользователь. Ответь ТОЛЬКО одним словом: "image" если запрос просит создать/нарисовать/сгенерировать картинку, или "text" если это обычный вопрос или просьба написать текст.
+Запрос: {user_msg[:200]}
+Ответ (image или text):"""
+        
+        try:
+            intent_response = await client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=[{"role": "user", "content": intent_prompt}],
+                max_tokens=10,
+                temperature=0.0
+            )
+            intent = intent_response.choices[0].message.content.strip().lower()
+            
+            if intent == "image":
+                print(f"[ROUTER] Image generation detected → {IMAGE_GEN_MODEL}")
+                return IMAGE_GEN_MODEL
+        except Exception as e:
+            print(f"[ROUTER] Intent detection failed: {e}")
+        
+        # Короткие запросы
+        if len(user_msg.split()) < 5:
+            print(f"[ROUTER] Short query → {DEFAULT_MODEL}")
+            return DEFAULT_MODEL
+        
+        if conversation_history:
+            # Смотрим последние 5 сообщений
+            for msg in conversation_history[-5:]:
+                if msg.get('role') == 'user':
+                    content = msg.get('content', '')
+                    if isinstance(content, list):
+                        text_parts = []
+                        for part in content:
+                            if isinstance(part, dict) and part.get('type') == 'text':
+                                text_parts.append(part.get('text', ''))
+                        content = ' '.join(text_parts) if text_parts else ''
+                    elif not isinstance(content, str):
+                        content = str(content)
+                    content = content.lower()
+        
+        # Формируем контекст для LLM-роутера
+        context_info = ""
+        if conversation_history and len(conversation_history) > 0:
+            last_messages = conversation_history[-3:]  # Последние 3 сообщения
+            context_info = "\n\nПоследние сообщения в диалоге:\n"
+            for msg in last_messages:
+                role = "Пользователь" if msg.get('role') == 'user' else "Ассистент"
+                content = msg.get('content', '')
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get('type') == 'text':
+                            text_parts.append(part.get('text', ''))
+                    content = ' '.join(text_parts) if text_parts else ''
+                elif not isinstance(content, str):
+                    content = str(content)
+                context_info += f"{role}: {content[:100]}\n"
+        
+        routing_prompt = f"""Ты — роутер запросов. Выбери модель из списка, учитывая контекст диалога.
+- {CODE_MODEL} — для ВСЕХ вопросов, связанных с программированием: написание кода, отладка, объяснение алгоритмов, решение задач. Если в диалоге обсуждался код, продолжай использовать эту модель.
+- {REASONING_MODEL} — для сложных логических рассуждений, философских вопросов, глубокого анализа.
+- {DEFAULT_MODEL} — для общих вопросов, фактов, простых диалогов.
+{context_info}
+Текущий запрос пользователя: "{user_msg[:200]}". Ответь ТОЛЬКО названием модели:"""
+        
+        try:
+            resp = await client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=[{"role": "user", "content": routing_prompt}],
+                max_tokens=20,
+                temperature=0.0
+            )
+            chosen = resp.choices[0].message.content.strip().lower()
+            
+            if CODE_MODEL in chosen or "qwen3-coder" in chosen or "code" in chosen:
+                return CODE_MODEL
+            if REASONING_MODEL in chosen or "deepseek" in chosen:
+                return REASONING_MODEL
+            return DEFAULT_MODEL
+        except Exception as e:
+            print(f"[ROUTER] LLM routing failed: {e}")
+            return DEFAULT_MODEL
+    
+    # Проверка на наличие изображений (несколько способов)
+    messages = payload.get('messages', [])
+    user_msgs = [m for m in messages if m.get('role') == 'user']
+    
+    has_image = False
+    has_file = False
+    
+    # Берём ТОЛЬКО последнее сообщение пользователя
+    if user_msgs:
+        last_msg = user_msgs[-1]
+        last_content = last_msg.get('content', [])
+        
+        # Проверяем, есть ли изображение в последнем сообщении
+        if isinstance(last_content, list):
+            for part in last_content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    has_image = True
+                    print(f"[ROUTER] Found image_url in LAST message")
+                    break
+        
+        # Проверяем метаданные о файлах (только для текущего сообщения)
+        if metadata and not has_image:
+            files = metadata.get('files', [])
+            if files and isinstance(files, list):
+                for file in files:
+                    if file and isinstance(file, dict):
+                        file_type = file.get('type', '') or file.get('mime_type', '')
+                        if file_type.startswith('image/'):
+                            has_image = True
+                            print(f"[ROUTER] Found image file in current message: {file.get('filename', 'unknown')}")
+                        elif file_type:
+                            has_file = True
+    
+    # Вызов роутера
+    if user_msgs:
+        last_msg_text = user_msgs[-1].get('content', '')
+        
+        # Гарантированно преобразуем в строку
+        if isinstance(last_msg_text, list):
+            text_parts = []
+            for part in last_msg_text:
+                if isinstance(part, dict):
+                    if part.get('type') == 'text':
+                        text_parts.append(part.get('text', ''))
+                    # image_url просто пропускаем
+                elif isinstance(part, str):
+                    text_parts.append(part)
+                else:
+                    text_parts.append(str(part))
+            last_msg_text = ' '.join(text_parts) if text_parts else ''
+        elif not isinstance(last_msg_text, str):
+            last_msg_text = str(last_msg_text)
+        
+        # Если после всех преобразований пустая строка, но есть изображение
+        if not last_msg_text.strip() and has_image:
+            last_msg_text = "Проанализируй изображение"
+        
+        if last_msg_text.strip():
+            # Передаём историю диалога в роутер
+            conversation_history = messages  # вся история сообщений
+            selected = await smart_route(last_msg_text, has_image, has_file, metadata, conversation_history)
+            form_data['model'] = selected
+            payload['model'] = selected
+            print(f"[ROUTER] Final decision: {selected} (image={has_image}, file={has_file})")
+        elif has_image:
+            # Сообщение только с картинкой, без текста
+            selected = await smart_route("Проанализируй изображение", has_image, has_file, metadata, messages)
+            form_data['model'] = selected
+            payload['model'] = selected
+            print(f"[ROUTER] Final decision (image only): {selected}")
+
+    # Генерация изображений
+    if payload.get('model') == IMAGE_GEN_MODEL:
+        # Берём последнее сообщение пользователя
+        messages = payload.get('messages', [])
+        prompt = ""
+        
+        for msg in reversed(messages):
+            if msg.get('role') == 'user':
+                content = msg.get('content', '')
+                if isinstance(content, str):
+                    prompt = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if part.get('type') == 'text':
+                            prompt = part.get('text', '')
+                            break
+                break
+        
+        if not prompt:
+            prompt = form_data.get('prompt', '')
+        
+        url = request.app.state.config.OPENAI_API_BASE_URLS[0]
+        key = request.app.state.config.OPENAI_API_KEYS[0]
+        
+        image_payload = {
+            "model": IMAGE_GEN_MODEL,
+            "prompt": prompt,
+            "n": 1,
+            "size": "1024x1024"
+        }
+        
+        print(f"[IMAGE GEN] Generating image for prompt: {prompt}")  # Лог для отладки
+        
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
+        }
+        
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            try:
+                async with session.post(
+                    f'{url}/images/generations',
+                    headers=headers,
+                    json=image_payload,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    response_data = await r.json()
+                    
+                    if r.status >= 400:
+                        print(f"[IMAGE GEN] Error: {response_data}")
+                        return JSONResponse(status_code=r.status, content=response_data)
+                    
+                    image_url = response_data.get('data', [{}])[0].get('url', '')
+                    print(f"[IMAGE GEN] Success! Image URL: {image_url}")
+                    
+                    formatted_response = {
+                        "id": "image-gen-response",
+                        "object": "chat.completion",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": f"![generated]({image_url})\n\n[Смотреть изображение]({image_url})"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    }
+                    return formatted_response
+                    
+            except Exception as e:
+                log.exception(e)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Image generation failed: {str(e)}",
+                )
+
+    # Убеждаемся, что выбранная роутером модель не будет перезаписана
+    if selected and selected != form_data.get('model'):
+        print(f"[ROUTER] WARNING: Model changed from {form_data.get('model')} to {selected}, forcing override")
+        form_data['model'] = selected
+        payload['model'] = selected
+    
+    # Очистка истории от изображений
+    current_model = payload.get('model', '')
+    
+    if current_model not in VISION_MODELS:
+        messages = payload.get('messages', [])
+        cleaned_messages = []
+        
+        for msg in messages:
+            content = msg.get('content', '')
+            if isinstance(content, list):
+                # Извлекаем только текст из сообщения
+                text_parts = [part.get('text', '') for part in content if part.get('type') == 'text']
+                if text_parts:
+                    msg['content'] = ' '.join(text_parts)
+                    cleaned_messages.append(msg)
+                else:
+                    msg['content'] = "[Пользователь отправил изображение]"
+                    cleaned_messages.append(msg)
+            else:
+                cleaned_messages.append(msg)
+        
+        payload['messages'] = cleaned_messages
+        print(f"[ROUTER] Converted image messages to text for model: {current_model}")
+ 
+    #--------------------------------------------------------------------------------
+
+    model_id = form_data.get('model') 
     model_info = Models.get_model_by_id(model_id)
 
     # Check model info and override the payload
@@ -1217,6 +1657,67 @@ async def generate_chat_completion(
         if not streaming:
             await cleanup_response(r, session)
 
+ #--------------------------------------------------------------------------
+@router.post('/images/generations') # Генерация изображений
+async def generate_image(
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    url = request.app.state.config.OPENAI_API_BASE_URLS[0]
+    key = request.app.state.config.OPENAI_API_KEYS[0]
+    
+    prompt = form_data.get('prompt', '')
+    if not prompt and 'messages' in form_data:
+        messages = form_data.get('messages', [])
+        for msg in messages:
+            if msg.get('role') == 'user':
+                content = msg.get('content', '')
+                if isinstance(content, str):
+                    prompt = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if part.get('type') == 'text':
+                            prompt = part.get('text', '')
+                            break
+                break
+    
+    payload = {
+        "model": "qwen-image-lightning",
+        "prompt": prompt,
+        "n": form_data.get('n', 1),
+        "size": form_data.get('size', '1024x1024')
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        try:
+            async with session.post(
+                f'{url}/images/generations',
+                headers=headers,
+                json=payload,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as r:
+                response_data = await r.json()
+                
+                if r.status >= 400:
+                    print(f"[IMAGE GEN] Error: {response_data}")
+                    return JSONResponse(status_code=r.status, content=response_data)
+                
+                print(f"[IMAGE GEN] Success! Image URL: {response_data.get('data', [{}])[0].get('url', 'unknown')}")
+                return response_data
+                
+        except Exception as e:
+            log.exception(e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Image generation failed: {str(e)}",
+            )
+ #--------------------------------------------------------------------------
 
 async def embeddings(request: Request, form_data: dict, user):
     """

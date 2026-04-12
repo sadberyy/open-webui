@@ -19,7 +19,17 @@ from langchain_classic.retrievers import (
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
-from open_webui.config import VECTOR_DB
+#---------------------------------------
+from open_webui.config import (
+    VECTOR_DB,
+    RAG_EMBEDDING_QUERY_PREFIX,
+    RAG_EMBEDDING_CONTENT_PREFIX,
+    RAG_EMBEDDING_PREFIX_FIELD_NAME,
+    OPENAI_API_BASE_URL,
+    OPENAI_API_KEY,
+)
+#---------------------------------------
+
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 
@@ -553,19 +563,24 @@ def generate_openai_batch_embeddings(
     user: UserModel = None,
 ) -> list[list[float]]:
     log.debug(f'generate_openai_batch_embeddings:model {model} batch size: {len(texts)}')
-    json_data = {'input': texts, 'model': model}
+    #------------------------------------------------------------------------------------
+    effective_url = OPENAI_API_BASE_URL
+    effective_key = OPENAI_API_KEY
+    effective_model = 'bge-m3'
+    
+    json_data = {'input': texts, 'model': effective_model}
     if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
         json_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
 
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {key}',
+        'Authorization': f'Bearer {effective_key}',
     }
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
         headers = include_user_info_headers(headers, user)
 
     r = requests.post(
-        f'{url}/embeddings',
+        f'{effective_url}/embeddings',
         headers=headers,
         json=json_data,
     )
@@ -575,7 +590,7 @@ def generate_openai_batch_embeddings(
         return [elem['embedding'] for elem in data['data']]
     else:
         raise ValueError("Unexpected OpenAI embeddings response: missing 'data' key")
-
+#------------------------------------------------------------------------------------------
 
 async def agenerate_openai_batch_embeddings(
     model: str,
@@ -586,13 +601,19 @@ async def agenerate_openai_batch_embeddings(
     user: UserModel = None,
 ) -> list[list[float]]:
     log.debug(f'agenerate_openai_batch_embeddings:model {model} batch size: {len(texts)}')
-    form_data = {'input': texts, 'model': model}
+    
+    #-----------------------------------------------------------------------------------
+    effective_url = OPENAI_API_BASE_URL
+    effective_key = OPENAI_API_KEY
+    effective_model = 'bge-m3'
+    
+    form_data = {'input': texts, 'model': effective_model}
     if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
         form_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
 
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {key}',
+        'Authorization': f'Bearer {effective_key}',
     }
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
         headers = include_user_info_headers(headers, user)
@@ -601,7 +622,7 @@ async def agenerate_openai_batch_embeddings(
         trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
     ) as session:
         async with session.post(
-            f'{url}/embeddings',
+            f'{effective_url}/embeddings',
             headers=headers,
             json=form_data,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
@@ -612,7 +633,7 @@ async def agenerate_openai_batch_embeddings(
                 return [item['embedding'] for item in data['data']]
             else:
                 raise ValueError("Unexpected OpenAI embeddings response: missing 'data' key")
-
+#-----------------------------------------------------------------------------------
 
 def generate_azure_openai_batch_embeddings(
     model: str,

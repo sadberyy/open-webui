@@ -18,3 +18,14 @@ uploads
 **/*.db
 _test
 backend/data/*
+
+node_modules
+.git
+dist
+build
+.vscode
+.idea
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
+*.log

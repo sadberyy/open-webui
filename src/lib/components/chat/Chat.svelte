@@ -109,6 +109,7 @@
 	import { getBanners } from '$lib/apis/configs';
 
 	export let chatIdProp = '';
+	export let autoModelSelection = true;
 
 	let loading = true;
 
@@ -134,6 +135,7 @@
 	let eventCallback = null;
 
 	let selectedModels = [''];
+	let autoModelSelection = true;
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
 	$: if (atSelectedModel !== undefined) {
@@ -141,6 +143,15 @@
 	} else {
 		selectedModelIds = selectedModels;
 	}
+
+	    // Текущая выбранная модель (первая в списке)
+    $: currentSelectedModelId = selectedModelIds?.at(0) ?? null;
+
+    $: currentSelectedModel =
+        $models?.find((m) => m.id === currentSelectedModelId) ?? null;
+
+    $: currentModelLabel =
+        currentSelectedModel?.name || currentSelectedModel?.id || 'Модель не выбрана';
 
 	let selectedToolIds = [];
 	let selectedFilterIds = [];
@@ -2229,7 +2240,7 @@
 			localStorage.token,
 			{
 				stream: stream,
-				model: model.id,
+				model: autoModelSelection ? 'auto' : model.id,
 				messages: messages,
 				params: {
 					...$settings?.params,
@@ -2282,6 +2293,11 @@
 						: {}),
 					follow_up_generation: $settings?.autoFollowUps ?? true
 				},
+
+        		metadata: {
+        		    ...(metadata ?? {}),
+        		    manual_model_selection: !autoModelSelection
+        		},				
 
 				...(stream && (model.info?.meta?.capabilities?.usage ?? false)
 					? {
@@ -2801,6 +2817,24 @@
 						}}
 					/>
 
+					<div class="mx-4 mt-2 mb-2 flex items-center gap-2 flex-wrap z-10">
+					    <button
+					        type="button"
+					        on:click={() => (autoModelSelection = !autoModelSelection)}
+					        class="px-3 py-1.5 text-sm rounded-lg border transition
+					            {autoModelSelection
+					                ? 'bg-emerald-100 border-emerald-300 text-emerald-800 dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300'
+					                : 'bg-white border-gray-200 text-gray-700 dark:bg-gray-900 dark:border-gray-700 dark:text-gray-200'}"
+					    >
+					        {autoModelSelection ? 'Автоподбор: включён' : 'Автоподбор: выключен'}
+					    </button>
+					
+					    <div class="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200">
+					        Сейчас используется: {autoModelSelection ? 'автовыбор' : currentModelLabel}
+					    </div>
+					</div>
+
+
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
@@ -2845,6 +2879,7 @@
 									{history}
 									{taskIds}
 									{selectedModels}
+									{autoModelSelection}
 									bind:files
 									bind:prompt
 									bind:autoScroll

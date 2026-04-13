@@ -33,6 +33,10 @@ from open_webui.config import (
     OPENAI_API_BASE_URL,#-----------------------
     OPENAI_API_KEY,
 )
+
+from open_webui.retrieval.utils import get_content_from_url
+from fastapi.concurrency import run_in_threadpool
+from open_webui.routers.retrieval import process_web
 #---------------------------------------------------
 from open_webui.env import (
     MODELS_CACHE_TTL,
@@ -1031,7 +1035,141 @@ async def generate_chat_completion(
     metadata = payload.pop('metadata', None)
 
     #--------------------------------------------------------------------------------
+    # Проверка на вручную выбранную модель
+    user_selected_model = form_data.get('model')
+    is_manual_selection = False
+    
+    if user_selected_model and user_selected_model != "auto":
+        is_manual_selection = True
+        print(f"[ROUTER] Manual model selection detected: {user_selected_model}")
+
+    selected = None
+
+    # Модель, классифицирующая запрос на "нужен ли поиск в интернете или не нужен"
+    need_search = False
+    last_query = ""
+    
+    messages = payload.get('messages', [])
+    user_messages = [m for m in messages if m.get('role') == 'user']
+    
+    if user_messages:
+        last_query = user_messages[-1].get('content', '')
+        if isinstance(last_query, list):
+            text_parts = [part.get('text', '') for part in last_query if isinstance(part, dict) and part.get('type') == 'text']
+            last_query = ' '.join(text_parts) if text_parts else ''
         
+        if last_query and isinstance(last_query, str) and len(last_query.strip()) > 0:
+            search_decision_client = AsyncOpenAI(
+                base_url=OPENAI_API_BASE_URL,
+                api_key=OPENAI_API_KEY,
+                timeout=5.0
+            )
+            
+            decision_prompt = f"""Ты — классификатор запросов. Ответь ТОЛЬКО "yes" или "no".
+Нужно ли искать в интернете актуальную информацию для ответа на этот запрос?
+
+Отвечай "yes" если:
+- Вопрос о текущей дате, времени, новостях, событиях
+- Вопрос требует актуальных данных (курсы, погода, цены, пробки)
+- Пользователь явно просит найти информацию ("найди", "поищи", "расскажи о", "узнай" и т.д.)
+
+Отвечай "no" если:
+- Вопрос о фактах, не требующих актуальности (столица Франции — Париж)
+- Вопрос о коде, программировании
+- Общие знания, математика, логика
+- Перевод текста
+- Просьба написать письмо, стих, рассказ
+
+Запрос: "{last_query[:500]}". Ответ (yes/no):"""
+            
+            try:
+                decision_response = await search_decision_client.chat.completions.create(
+                    model="mws-gpt-alpha",
+                    messages=[{"role": "user", "content": decision_prompt}],
+                    max_tokens=5,
+                    temperature=0.0
+                )
+                need_search = decision_response.choices[0].message.content.strip().lower() == "yes"
+                print(f"[SEARCH] Need search: {need_search} for: {last_query[:50]}...")
+            except Exception as e:
+                print(f"[SEARCH] Decision error: {e}, defaulting to False")
+                need_search = False
+    
+    # Поиск в Интернете
+    if request.app.state.config.ENABLE_WEB_SEARCH and need_search:
+        print(f"[SEARCH] Executing web search for: {last_query[:100]}...")
+        
+        try:
+            from open_webui.routers.retrieval import process_web_search
+            
+            class SearchForm:
+                def __init__(self, queries):
+                    self.queries = queries
+            
+            search_result = await process_web_search(
+                request=request,
+                form_data=SearchForm([last_query]),
+                user=user
+            )
+            
+            # Просто добавляем результаты в сообщение
+            if search_result and search_result.get('docs'):
+                search_context = "РЕЗУЛЬТАТЫ ПОИСКА В ИНТЕРНЕТЕ:\n\n"
+                for doc in search_result.get('docs', []):
+                    content = doc.get('content', '')
+                    meta = doc.get('metadata', {})
+                    source = meta.get('source', meta.get('link', 'unknown'))
+                    if content:
+                        search_context += f"Источник: {source}\n{content}\n\n---\n\n"
+                
+                messages = payload.get('messages', [])
+                messages.insert(0, {
+                    "role": "system",
+                    "content": search_context[:6000]
+                })
+                payload['messages'] = messages
+                print(f"[SEARCH] Added context (length: {len(search_context)})")
+            elif search_result and search_result.get('collection_names'):
+                print(f"[SEARCH] No docs, using collections: {search_result.get('collection_names')}")
+                
+        except Exception as e:
+            print(f"[SEARCH] Error: {e}")
+
+    # Веб-парсинг без сохранения в векторную бд
+    messages = payload.get('messages', [])
+    user_messages = [m for m in messages if m.get('role') == 'user']
+    has_url = False
+
+    if user_messages:
+        last_msg = user_messages[-1].get('content', '')
+        if isinstance(last_msg, str):
+            urls = re.findall(r'https?://[^\s]+', last_msg)
+
+            if urls:
+                print(f"[WEB] Found URLs in message: {urls}")
+
+                for url in urls:
+                    try:
+                        content, docs = await run_in_threadpool(get_content_from_url, request, url)
+                        
+                        if content and len(content) > 100:
+                            # Добавляем содержимое в системное сообщение
+                            content_preview = content[:5000]
+                            system_message = {
+                                "role": "system",
+                                "content": f"Содержимое веб-страницы {url}:\n\n{content_preview}"
+                            }
+                            messages.insert(0, system_message)
+                            payload['messages'] = messages
+                            print(f"[WEB] Direct parse success: {url} (length: {len(content)})")
+                            has_url = True
+                            break
+                        else:
+                            print(f"[WEB] Not enough content from: {url}")
+                            
+                    except Exception as e:
+                        print(f"[WEB] Direct parse error for {url}: {e}")
+    
     VISION_MODELS = ["qwen2.5-vl-72b", "cotype-pro-vl-32b", "qwen2.5-vl"]
     IMAGE_GEN_MODEL = "qwen-image-lightning" 
     DEFAULT_MODEL = "mws-gpt-alpha"
@@ -1095,7 +1233,6 @@ async def generate_chat_completion(
             assistant_messages = [m for m in messages if m.get('role') == 'assistant']
             
             if user_messages:
-                # Берём последнее сообщение пользователя и ответ ассистента (если есть)
                 last_user_msg = user_messages[-1].get('content', '')
                 last_assistant_msg = assistant_messages[-1].get('content', '') if assistant_messages else ''
                 
@@ -1143,7 +1280,6 @@ SAVE: [информация для сохранения]
                         if result.startswith("SAVE:"):
                             fact = result.replace("SAVE:", "").strip()
                             if fact and len(fact) > 10 and fact != "NONE":
-                                # Проверяем, нет ли уже такого воспоминания
                                 existing_memories = Memories.get_memories_by_user_id(user.id)
                                 existing_texts = [m.content.lower() for m in existing_memories] if existing_memories else []
                                 
@@ -1168,8 +1304,7 @@ SAVE: [информация для сохранения]
                         
         except Exception as e:
             print(f"[MEMORY] Auto-save error: {e}")
-    # ========== КОНЕЦ УМНОГО АВТОМАТИЧЕСКОГО СОХРАНЕНИЯ ==========
-
+    
     # Удаляем информацию о предыдущей модели из запроса. Это заставит систему заново определить модель для каждого сообщения
     if 'model' in form_data:
         user_selected_model = form_data.get('model')
@@ -1288,7 +1423,10 @@ SAVE: [информация для сохранения]
     
     has_image = False
     has_file = False
-    
+    if has_url:
+        has_file = True
+        print(f"[ROUTER] URL detected, setting has_file=True")
+
     # Берём ТОЛЬКО последнее сообщение пользователя
     if user_msgs:
         last_msg = user_msgs[-1]
@@ -1316,17 +1454,15 @@ SAVE: [информация для сохранения]
                             has_file = True
     
     # Вызов роутера
-    if user_msgs:
+    if not is_manual_selection and user_msgs:
         last_msg_text = user_msgs[-1].get('content', '')
         
-        # Гарантированно преобразуем в строку
         if isinstance(last_msg_text, list):
             text_parts = []
             for part in last_msg_text:
                 if isinstance(part, dict):
                     if part.get('type') == 'text':
                         text_parts.append(part.get('text', ''))
-                    # image_url просто пропускаем
                 elif isinstance(part, str):
                     text_parts.append(part)
                 else:
@@ -1335,13 +1471,12 @@ SAVE: [информация для сохранения]
         elif not isinstance(last_msg_text, str):
             last_msg_text = str(last_msg_text)
         
-        # Если после всех преобразований пустая строка, но есть изображение
         if not last_msg_text.strip() and has_image:
             last_msg_text = "Проанализируй изображение"
         
         if last_msg_text.strip():
             # Передаём историю диалога в роутер
-            conversation_history = messages  # вся история сообщений
+            conversation_history = messages
             selected = await smart_route(last_msg_text, has_image, has_file, metadata, conversation_history)
             form_data['model'] = selected
             payload['model'] = selected
@@ -1352,6 +1487,9 @@ SAVE: [информация для сохранения]
             form_data['model'] = selected
             payload['model'] = selected
             print(f"[ROUTER] Final decision (image only): {selected}")
+    elif is_manual_selection:
+        print(f"[ROUTER] Using manually selected model: {user_selected_model}")
+        payload['model'] = user_selected_model
 
     # Генерация изображений
     if payload.get('model') == IMAGE_GEN_MODEL:
@@ -1432,7 +1570,7 @@ SAVE: [информация для сохранения]
                 )
 
     # Убеждаемся, что выбранная роутером модель не будет перезаписана
-    if selected and selected != form_data.get('model'):
+    if selected is not None and selected != form_data.get('model'):
         print(f"[ROUTER] WARNING: Model changed from {form_data.get('model')} to {selected}, forcing override")
         form_data['model'] = selected
         payload['model'] = selected

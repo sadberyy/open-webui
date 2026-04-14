@@ -149,7 +149,8 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-
+	let deepResearchEnabled = false;
+	
 	let showCommands = false;
 
 	let generating = false;
@@ -218,6 +219,7 @@
 						webSearchEnabled = input.webSearchEnabled;
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						deepResearchEnabled = input.deepResearchEnabled;
 					}
 				} catch (e) {}
 			} else {
@@ -279,7 +281,7 @@
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
-
+		deepResearchEnabled = false;
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			setDefaults();
 		}
@@ -360,6 +362,14 @@
 					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
 				) {
 					codeInterpreterEnabled = model.info.meta.defaultFeatureIds.includes('code_interpreter');
+				}
+
+				if (
+					model.info?.meta?.capabilities?.['deep_research'] &&
+					$config?.features?.enable_deep_research &&
+					($user?.role === 'admin' || $user?.permissions?.features?.deep_research)
+				) {
+					deepResearchEnabled = model.info.meta.defaultFeatureIds.includes('deep_research');
 				}
 			}
 		}
@@ -741,7 +751,7 @@
 				webSearchEnabled = false;
 				imageGenerationEnabled = false;
 				codeInterpreterEnabled = false;
-
+				deepResearchEnabled = false;
 				try {
 					const input = JSON.parse(storageChatInput);
 
@@ -753,6 +763,7 @@
 						webSearchEnabled = input.webSearchEnabled;
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						deepResearchEnabled = input.deepResearchEnabled;
 					}
 				} catch (e) {}
 			}
@@ -1175,6 +1186,10 @@
 
 		if ($page.url.searchParams.get('code-interpreter') === 'true') {
 			codeInterpreterEnabled = true;
+		}
+
+		if ($page.url.searchParams.get('deep-research') === 'true') {
+			deepResearchEnabled = true;
 		}
 
 		if ($page.url.searchParams.get('tools')) {
@@ -2039,6 +2054,11 @@
 					$config?.features?.enable_web_search &&
 					($user?.role === 'admin' || $user?.permissions?.features?.web_search)
 						? webSearchEnabled
+						: false,
+				deep_research:
+					$config?.features?.enable_deep_research &&
+					($user?.role === 'admin' || $user?.permissions?.features?.deep_research)
+						? deepResearchEnabled
 						: false
 			};
 
@@ -2231,6 +2251,7 @@
 				stream: stream,
 				model: model.id,
 				messages: messages,
+				deep_research: deepResearchEnabled,
 				params: {
 					...$settings?.params,
 					...params,
@@ -2854,6 +2875,7 @@
 									bind:codeInterpreterEnabled
 									{pendingOAuthTools}
 									bind:webSearchEnabled
+									bind:deepResearchEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									bind:dragged
@@ -2937,6 +2959,7 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
+									bind:deepResearchEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									bind:dragged

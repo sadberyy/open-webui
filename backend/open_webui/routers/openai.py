@@ -1057,7 +1057,72 @@ async def generate_chat_completion(
         if isinstance(last_query, list):
             text_parts = [part.get('text', '') for part in last_query if isinstance(part, dict) and part.get('type') == 'text']
             last_query = ' '.join(text_parts) if text_parts else ''
+
+        # Режим исследования
+        deep_research_mode = form_data.get('deep_research', False)
         
+        if deep_research_mode and last_query:
+            print(f"[DEEP RESEARCH] Mode activated for: {last_query[:100]}...")
+            
+            # Итеративный поиск
+            all_results = []
+            search_queries = [last_query, f"{last_query} подробный анализ", f"{last_query} последние новости", f"{last_query} paper"]
+            
+            for sq in search_queries:
+                try:
+                    from open_webui.routers.retrieval import process_web_search
+                    
+                    class SearchForm:
+                        def __init__(self, queries):
+                            self.queries = queries
+                    
+                    result = await process_web_search(
+                        request=request,
+                        form_data=SearchForm([sq]),
+                        user=user
+                    )
+                    
+                    if result and result.get('docs'):
+                        all_results.extend(result.get('docs', []))
+                        print(f"[DEEP RESEARCH] Found {len(result.get('docs', []))} results for: {sq[:50]}...")
+                except Exception as e:
+                    print(f"[DEEP RESEARCH] Search error: {e}")
+            
+            # Формируем отчёт
+            if all_results:
+                unique_sources = {}
+                for doc in all_results[:5]:  # топ-5
+                    meta = doc.get('metadata', {})
+                    source = meta.get('source', meta.get('link', 'unknown'))
+                    if source not in unique_sources:
+                        unique_sources[source] = doc.get('content', '')[:2000]
+                
+                instruction = f"""Ты — аналитический ассистент. Используй ТОЛЬКО информацию из предоставленных ниже источников.
+ОБЯЗАТЕЛЬНО указывай источники в ответе в формате [1], [2] и т.д.
+Если информация не найдена в источниках, скажи об этом честно.
+Запрос пользователя: {last_query}
+Источники для анализа:
+"""
+                sources_for_response = []
+                for idx, (source, content) in enumerate(unique_sources.items(), 1):
+                    instruction += f"\n---\n## Источник {idx}: {source}\n\n{content}\n"
+                    sources_for_response.append(f"[{idx}] {source}")
+                
+                instruction += f"""
+ВАЖНО: Отвечая, ссылайся на источники! Пример: "Согласно источнику [1], ..."
+После ответа добавь раздел "Использованные источники:" со списком:
+{chr(10).join(sources_for_response)}
+Если источники не содержат ответа на запрос, скажи: "Информация не найдена в предоставленных источниках"."""
+                
+                messages = payload.get('messages', [])
+                # Удаляем старые system сообщения (кроме memory)
+                filtered_messages = [m for m in messages if m.get('role') != 'system' or 'память' in m.get('content', '').lower()]
+                filtered_messages.insert(0, {"role": "system", "content": instruction})
+                payload['messages'] = filtered_messages
+                print(f"[DEEP RESEARCH] Instruction added with {len(unique_sources)} sources")
+            else:
+                print(f"[DEEP RESEARCH] No results found")
+
         if last_query and isinstance(last_query, str) and len(last_query.strip()) > 0:
             search_decision_client = AsyncOpenAI(
                 base_url=OPENAI_API_BASE_URL,

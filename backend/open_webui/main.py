@@ -121,6 +121,8 @@ from open_webui.config import (
     OLLAMA_BASE_URLS,
     OLLAMA_API_CONFIGS,
     # OpenAI
+    OPENAI_API_BASE_URL,#-----------------------
+    OPENAI_API_KEY,#-----------------------
     ENABLE_OPENAI_API,
     OPENAI_API_BASE_URLS,
     OPENAI_API_KEYS,
@@ -698,6 +700,19 @@ async def lifespan(app: FastAPI):
             log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
         except Exception as e:
             log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
+
+    # ----------------------------------------------------------------------------------------
+    app.state.config.ENABLE_OLLAMA_API = False
+    app.state.config.ENABLE_OPENAI_API = True
+    
+    api_url = os.environ.get('OPENAI_API_BASE_URL', '')
+    api_key = os.environ.get('OPENAI_API_KEY', '')
+    
+    app.state.config.OPENAI_API_BASE_URLS = [api_url]
+    app.state.config.OPENAI_API_KEYS = [api_key]
+    
+    print(f"[CONFIG] api_key is norm" if api_key else "[CONFIG] OpenAI API Key: NOT SET")
+    # -----------------------------------------------------------------------------------------
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True

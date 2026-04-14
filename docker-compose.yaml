@@ -21,6 +21,8 @@ services:
     ports:
       - ${OPEN_WEBUI_PORT-3000}:8080
     environment:
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
       - ENABLE_WEB_SEARCH=true
       - WEB_SEARCH_ENGINE=duckduckgo
       - WEB_SEARCH_RESULT_COUNT=5
@@ -30,13 +32,15 @@ services:
       - ENABLE_WEB_LOADER_SSL_VERIFICATION=true
       - BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true
       - BYPASS_WEB_SEARCH_WEB_LOADER=false
-      - 'OLLAMA_BASE_URL=http://ollama:11434'
+      - 'OLLAMA_BASE_URL='
       - 'WEBUI_SECRET_KEY='
       - ENABLE_MEMORIES=true
       - RAG_EMBEDDING_ENGINE=openai
       - RAG_EMBEDDING_MODEL=bge-m3
       - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE_URLS=["${OPENAI_API_BASE_URL}"]
+      - OPENAI_API_KEYS=["${OPENAI_API_KEY}"]
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped

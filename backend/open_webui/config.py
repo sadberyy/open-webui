@@ -1057,9 +1057,35 @@ ENABLE_OPENAI_API = PersistentConfig(
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 OPENAI_API_BASE_URL = os.environ.get('OPENAI_API_BASE_URL', '')
 
+#--------------------------------------------------------------
+OPENAI_API_BASE_URLS = PersistentConfig(
+    'OPENAI_API_BASE_URLS',
+    'openai.api_base_urls',
+    (
+        [OPENAI_API_BASE_URL] 
+        if OPENAI_API_BASE_URL 
+        else [url.strip() for url in os.environ.get('OPENAI_API_BASE_URLS', '').split(';') if url.strip()]
+    ) or ['https://api.openai.com/v1']
+)
+
+OPENAI_API_KEYS = PersistentConfig(
+    'OPENAI_API_KEYS',
+    'openai.api_keys',
+    (
+        [OPENAI_API_KEY] 
+        if OPENAI_API_KEY 
+        else [key.strip() for key in os.environ.get('OPENAI_API_KEYS', '').split(';') if key.strip()]
+    ) or ['']
+)
+
+OPENAI_API_CONFIGS = PersistentConfig(
+    'OPENAI_API_CONFIGS',
+    'openai.api_configs',
+    {},
+)
+#--------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 GEMINI_API_BASE_URL = os.environ.get('GEMINI_API_BASE_URL', '')
-
 
 if OPENAI_API_BASE_URL == '':
     OPENAI_API_BASE_URL = 'https://api.openai.com/v1'

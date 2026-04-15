@@ -131,6 +131,7 @@
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
 	export let deepResearchEnabled = false;
+	export let autoModeEnabled = false;
 
 	export let pendingOAuthTools = [];
 
@@ -517,6 +518,7 @@
 		($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter);
 		
 	let showDeepResearchButton = true;
+	let showAutoModelButton = true;
 	// Disable code interpreter when terminal is active (mutually exclusive)
 	$: if ($selectedTerminalId && codeInterpreterEnabled) {
 		codeInterpreterEnabled = false;
@@ -1624,7 +1626,7 @@
 										</div>
 									</InputMenu>
 
-									{#if showDeepResearchButton || showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
+									{#if showAutoModelButton || showDeepResearchButton || showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
 										<div
 											class="flex self-center w-[1px] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50"
 										/>
@@ -1823,6 +1825,23 @@
 													</div>
 												</button>
 											</Tooltip>
+										{/if}
+
+										{#if true}
+    										<Tooltip content={$i18n.t('Auto Mode')} placement="top">
+        										<button
+            										on:click|preventDefault={() => (autoModeEnabled = !autoModeEnabled)}
+            										type="button"
+        											class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {autoModeEnabled
+                										? ' text-emerald-500 dark:text-emerald-300 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-400/10 dark:hover:bg-emerald-600/10 border border-emerald-200/40 dark:border-emerald-500/20'
+                										: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+        										>
+            										<Sparkles className="size-4" strokeWidth="1.75" />
+            										<div class="hidden group-hover:block">
+                										<XMark className="size-4" strokeWidth="1.75" />
+            										</div>
+        										</button>
+    										</Tooltip>
 										{/if}
 
 										{#each pendingOAuthTools as pendingTool (pendingTool.id)}

@@ -150,7 +150,8 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let deepResearchEnabled = false;
-	
+	let autoModeEnabled = false;
+
 	let showCommands = false;
 
 	let generating = false;
@@ -220,6 +221,7 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled;
+						autoModeEnabled = input.autoModeEnabled;
 					}
 				} catch (e) {}
 			} else {
@@ -282,6 +284,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		autoModeEnabled = false;
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			setDefaults();
 		}
@@ -370,6 +373,14 @@
 					($user?.role === 'admin' || $user?.permissions?.features?.deep_research)
 				) {
 					deepResearchEnabled = model.info.meta.defaultFeatureIds.includes('deep_research');
+				}
+
+				if (
+					model.info?.meta?.capabilities?.['auto_model'] &&
+					$config?.features?.enable_auto_model &&
+					($user?.role === 'admin' || $user?.permissions?.features?.auto_model)
+				) {
+					autoModeEnabled = model.info.meta.defaultFeatureIds.includes('auto_model');
 				}
 			}
 		}
@@ -752,6 +763,7 @@
 				imageGenerationEnabled = false;
 				codeInterpreterEnabled = false;
 				deepResearchEnabled = false;
+				autoModeEnabled = false;
 				try {
 					const input = JSON.parse(storageChatInput);
 
@@ -764,6 +776,7 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled;
+						autoModeEnabled = input.autoModeEnabled;
 					}
 				} catch (e) {}
 			}
@@ -1190,6 +1203,10 @@
 
 		if ($page.url.searchParams.get('deep-research') === 'true') {
 			deepResearchEnabled = true;
+		}
+
+		if ($page.url.searchParams.get('auto-model') === 'true') {
+			autoModeEnabled = true;
 		}
 
 		if ($page.url.searchParams.get('tools')) {
@@ -2059,6 +2076,11 @@
 					$config?.features?.enable_deep_research &&
 					($user?.role === 'admin' || $user?.permissions?.features?.deep_research)
 						? deepResearchEnabled
+						: false,
+				auto_model:
+					$config?.features?.enable_auto_model &&
+					($user?.role === 'admin' || $user?.permissions?.features?.auto_model)
+						? autoModeEnabled
 						: false
 			};
 
@@ -2252,6 +2274,7 @@
 				model: model.id,
 				messages: messages,
 				deep_research: deepResearchEnabled,
+				auto_model: autoModeEnabled,
 				params: {
 					...$settings?.params,
 					...params,
@@ -2876,6 +2899,7 @@
 									{pendingOAuthTools}
 									bind:webSearchEnabled
 									bind:deepResearchEnabled
+									bind:autoModeEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									bind:dragged
@@ -2960,6 +2984,7 @@
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
 									bind:deepResearchEnabled
+									bind:autoModeEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									bind:dragged

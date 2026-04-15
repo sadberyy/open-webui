@@ -1035,11 +1035,16 @@ async def generate_chat_completion(
     metadata = payload.pop('metadata', None)
 
     #--------------------------------------------------------------------------------
-    # Проверка на вручную выбранную модель
-    user_selected_model = form_data.get('model')
+    # Флаг авто-режима
+    auto_mode_enabled = form_data.get('auto_model', False)
     is_manual_selection = False
     
-    if user_selected_model and user_selected_model != "auto":
+    # Проверка на вручную выбранную модель
+    user_selected_model = form_data.get('model')
+    if auto_mode_enabled:
+        is_manual_selection = False
+        print(f"[ROUTER] Auto model enabled")
+    elif user_selected_model and user_selected_model != "auto":
         is_manual_selection = True
         print(f"[ROUTER] Manual model selection detected: {user_selected_model}")
 
